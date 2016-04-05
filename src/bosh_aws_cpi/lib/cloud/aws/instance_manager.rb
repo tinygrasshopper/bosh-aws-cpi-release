@@ -117,7 +117,27 @@ module Bosh::AwsCloud
 
     private
 
-    def build_instance_params(stemcell_id, resource_pool, networks_spec, disk_locality, options)
+    def build_instance_params(stemcell_id, resource_pool, networks_spec, disk_locality = [], options = {})
+      virtualization_type = @client.images[stemcell_id].virtualization_type
+      @client.volumes[volume_id].availability_zone.to_s
+
+
+      property_manager.create({
+        stemcell_id: stemcell_id,
+        virtualization_type: virtualization_type,
+        resource_pool: resource_pool,
+        networks_spec: networks_spec,
+        defaults: options['aws']
+      })
+
+      property_manager.add_foo
+      property_manager.add_networks_spec
+      property_manager.add_resource_pool
+
+      @resource_pool = ...
+
+
+
       virtualization_type = @client.images[stemcell_id].virtualization_type
       block_device_info = block_device_mapping(virtualization_type, resource_pool)
 
