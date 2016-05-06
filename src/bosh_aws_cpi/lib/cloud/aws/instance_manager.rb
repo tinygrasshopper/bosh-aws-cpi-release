@@ -1,5 +1,6 @@
 require "common/common"
 require "time"
+require "json"
 
 module Bosh::AwsCloud
   class InstanceManager
@@ -24,7 +25,11 @@ module Bosh::AwsCloud
 
       @logger.info("Creating new instance with: #{instance_params.inspect}")
 
-      aws_instance = create_aws_instance(instance_params, resource_pool)
+      if instance_params.to_json.include?("subnet-b63ee1d2")
+        aws_instance = get_instance_from_pool(instance_params, resource_pool)
+      else
+        aws_instance = create_aws_instance(instance_params, resource_pool)
+      end
 
       instance = Instance.new(aws_instance, @registry, @elb, @logger)
 
@@ -52,6 +57,50 @@ module Bosh::AwsCloud
     end
 
     private
+
+    def get_instance_from_pool(instance_params, resource_pool)
+      @logger.info("Reading pool")
+      instances = JSON.parse(File.read('/var/vcap/store/aws_cpi/pool.json'))
+      @logger.info("Instances in pool #{instances}")
+      if instances.size < 5
+        @logger.info("Running low on instances")
+        new_instances = create_multiple_aws_instances(instance_params, resource_pool, 10)
+        instances = instances + new_instances
+        @logger.info("New instances in pool #{instances}")
+      end
+
+      instance_id = instances.shift
+      File.write('/var/vcap/store/aws_cpi/pool.json',instances.to_json)
+      @logger.info("Returning instance #{instance_id}")
+      @ec2.instances[instance_id]
+    end
+
+    def create_multiple_aws_instances(instance_params, resource_pool, count)
+      if resource_pool["spot_bid_price"]
+        begin
+          return create_aws_spot_instance instance_params, resource_pool["spot_bid_price"]
+        rescue Bosh::Clouds::VMCreationFailed => e
+          raise unless resource_pool["spot_ondemand_fallback"]
+        end
+      end
+
+      instance_params[:min_count] = count
+      instance_params[:max_count] = count
+
+      # Retry the create instance operation a couple of times if we are told that the IP
+      # address is in use - it can happen when the director recreates a VM and AWS
+      # is too slow to update its state when we have released the IP address and want to
+      # realocate it again.
+      errors = [AWS::EC2::Errors::InvalidIPAddress::InUse]
+      Bosh::Common.retryable(sleep: instance_create_wait_time, tries: 20, on: errors) do |tries, error|
+        @logger.info("Launching on demand instance...")
+        if error.class == AWS::EC2::Errors::InvalidIPAddress::InUse
+          @logger.warn("IP address was in use: #{error}")
+        end
+        resp = @ec2.client.run_instances(instance_params)
+        resp.instances_set.collect(&:instance_id)
+      end
+    end
 
     def build_instance_params(stemcell_id, resource_pool, networks_spec, block_device_mappings, disk_locality = [], options = {})
       volume_zones = (disk_locality || []).map { |volume_id| @ec2.volumes[volume_id].availability_zone.to_s }
